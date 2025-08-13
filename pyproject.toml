@@ -1,0 +1,25 @@
+[project]
+name = "vidsafe-facebook-compliance"
+version = "1.0.0"
+description = "Simple Facebook-compliant video redaction tool"
+authors = [
+    {name = "VidSafe Team"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "opencv-python>=4.5.0",
+    "numpy>=1.20.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/suv0/VidSafe---Local-Video-Redaction-CLI"
+Repository = "https://github.com/suv0/VidSafe---Local-Video-Redaction-CLI"
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["facebook_compliance"]
