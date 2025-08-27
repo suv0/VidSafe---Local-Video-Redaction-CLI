@@ -383,19 +383,19 @@ class IntelligentGoreDetector:
     
     def _detect_weapons_enhanced(self, frame: np.ndarray) -> List[Dict]:
         """
-        Ultra-conservative weapon detection - only flag obvious weapons.
-        Drastically reduced false positives by requiring multiple validation criteria.
+        Facebook-compliant weapon detection - aggressive flagging for platform safety.
+        Facebook requires zero tolerance for weapons, so we err on the side of caution.
         """
         detections = []
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = frame.shape[:2]
         
-        # Much stricter edge detection
-        edges = cv2.Canny(gray, 80, 200)  # Higher thresholds to reduce noise
+        # More sensitive edge detection for Facebook compliance
+        edges = cv2.Canny(gray, 50, 150)  # Lower thresholds to catch more objects
         
-        # Detect only very clear, long straight lines
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100,  # Much higher threshold
-                               minLineLength=100, maxLineGap=5)      # Longer lines, smaller gaps
+        # Detect even shorter lines that could be weapons
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50,   # Much lower threshold
+                               minLineLength=60, maxLineGap=10)      # Shorter lines, bigger gaps
         
         if lines is not None:
             weapon_candidates = []
@@ -405,77 +405,76 @@ class IntelligentGoreDetector:
                 length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
                 angle = np.abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
                 
-                # Only consider very long, straight objects
-                if length > 120:  # Much longer minimum length
-                    # Check if angle suggests weapon (horizontal, vertical, or diagonal)
-                    is_weapon_angle = (angle < 10 or angle > 170 or 
-                                     (80 < angle < 100) or (45 < angle < 55) or (125 < angle < 135))
+                # Facebook compliance: flag shorter objects too
+                if length > 60:  # Much lower minimum length for Facebook
+                    # More permissive angle detection for Facebook safety
+                    is_weapon_angle = (angle < 20 or angle > 160 or 
+                                     (70 < angle < 110) or (35 < angle < 65) or (115 < angle < 145))
                     
                     if is_weapon_angle:
-                        # Additional validation: check surrounding area for weapon characteristics
-                        margin = 20
+                        # Larger detection area for Facebook compliance
+                        margin = 30  # Bigger margin
                         x_min, y_min = max(0, min(x1, x2) - margin), max(0, min(y1, y2) - margin)
                         x_max, y_max = min(w, max(x1, x2) + margin), min(h, max(y1, y2) + margin)
                         
                         roi = frame[y_min:y_max, x_min:x_max]
-                        if roi.size > 0 and self._validate_weapon_characteristics(roi):
+                        if roi.size > 0 and self._validate_weapon_characteristics_facebook(roi):
                             weapon_candidates.append({
                                 'line': line[0],
                                 'length': length,
                                 'bbox': (x_min, y_min, x_max, y_max)
                             })
             
-            # Group nearby weapon candidates
-            if len(weapon_candidates) >= 2:  # Require at least 2 strong candidates
-                # Only flag if multiple weapon-like lines are close together
+            # Facebook compliance: flag single candidates too (more aggressive)
+            if len(weapon_candidates) >= 1:  # Only need 1 candidate for Facebook
+                # Flag anything that looks remotely weapon-like
                 for candidate in weapon_candidates:
                     bbox = candidate['bbox']
                     
-                    # Final validation with very high standards
-                    if self._final_weapon_validation(frame, bbox):
+                    # Less strict validation for Facebook compliance
+                    if self._final_weapon_validation_facebook(frame, bbox):
                         detection = {
                             'type': 'weapon',
-                            'confidence': min(0.6, candidate['length'] / 200),  # Lower max confidence
+                            'confidence': min(0.8, candidate['length'] / 150),  # Higher confidence for Facebook
                             'bbox': bbox
                         }
                         detections.append(detection)
-                        break  # Only add one weapon detection per region
         
         return detections
     
-    def _validate_weapon_characteristics(self, roi):
-        """Validate that the region has weapon-like characteristics."""
+    def _validate_weapon_characteristics_facebook(self, roi):
+        """Facebook-compliant weapon validation - more aggressive flagging."""
         if roi.size == 0:
             return False
             
-        # Check for metallic/sharp object characteristics
+        # More permissive characteristics for Facebook compliance
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
         
-        # Look for high contrast edges (metallic surfaces)
-        edges = cv2.Canny(gray_roi, 100, 200)
+        # Lower threshold for edge detection (more sensitive)
+        edges = cv2.Canny(gray_roi, 50, 150)  # Lower thresholds
         edge_density = np.sum(edges > 0) / edges.size
         
-        # Check color variance (weapons often have uniform colors)
+        # Check color variance (more permissive)
         color_variance = np.var(gray_roi)
         
-        # Weapons typically have high edge density and moderate color variance
-        return edge_density > 0.1 and 500 < color_variance < 3000
+        # Facebook compliance: flag anything with moderate edges
+        return edge_density > 0.05 and color_variance > 200  # Much lower thresholds
     
-    def _final_weapon_validation(self, frame, bbox):
-        """Final strict validation to minimize false positives."""
+    def _final_weapon_validation_facebook(self, frame, bbox):
+        """Facebook-compliant final validation - aggressive flagging."""
         x1, y1, x2, y2 = bbox
         roi = frame[y1:y2, x1:x2]
         
         if roi.size == 0:
             return False
         
-        # Check aspect ratio - weapons are typically long and thin
+        # More permissive aspect ratio for Facebook
         width = x2 - x1
         height = y2 - y1
         aspect_ratio = max(width, height) / max(min(width, height), 1)
         
-        # Weapon should have high aspect ratio (long and thin)
-        if aspect_ratio < 3:
+        # Facebook: flag even moderately elongated objects
+        if aspect_ratio < 1.5:  # Much lower requirement
             return False
         
         # Check for consistent color/texture (not human skin)
@@ -533,11 +532,70 @@ class IntelligentGoreDetector:
     
     def _detect_death_indicators(self, frame: np.ndarray) -> List[Dict]:
         """
-        DISABLED: Death indicator detection too aggressive - causing false positives.
-        Only enable this for videos with confirmed deceased individuals.
+        Facebook-compliant violence detection using computer vision.
+        Focus on obvious violence patterns rather than AI model predictions.
         """
-        # Currently disabled due to false positives on normal people
-        return []
+        detections = []
+        
+        # Use computer vision to detect violence patterns
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = frame.shape[:2]
+        
+        # Look for chaotic motion patterns (fights, violence)
+        edges = cv2.Canny(gray, 30, 100)  # Sensitive edge detection
+        
+        # Find regions with high activity (violence often has rapid motion)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > 2000:  # Significant activity area
+                x, y, w_c, h_c = cv2.boundingRect(contour)
+                
+                # Check if this region has violence characteristics
+                roi = frame[y:y+h_c, x:x+w_c]
+                if roi.size > 0 and self._validate_violence_context(roi):
+                    # Additional check for people in the region (violence involves people)
+                    if self._has_human_context(roi):
+                        detections.append({
+                            'type': 'violence_indicator',
+                            'confidence': 0.7,  # Moderate confidence for computer vision
+                            'bbox': [x, y, x+w_c, y+h_c],
+                            'details': f'Violence pattern detected (area: {area})'
+                        })
+        
+        return detections
+    
+    def _validate_violence_context(self, region):
+        """Validate that the region shows actual violence context."""
+        # Check for multiple objects (people + weapons/violence)
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        
+        # Look for violence indicators (high contrast, chaotic patterns)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = np.sum(edges > 0) / edges.size
+        
+        # Violence often has high activity/contrast
+        variance = np.var(gray)
+        
+        # Facebook compliance: flag if there's significant activity
+        return edge_density > 0.1 and variance > 1000
+    
+    def _has_human_context(self, region):
+        """Check if region contains human-like features (for violence detection)."""
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        
+        # Look for skin-like colors in HSV
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        
+        # Skin color range (broad to catch different skin tones)
+        lower_skin = np.array([0, 20, 70])
+        upper_skin = np.array([20, 255, 255])
+        skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+        
+        # If there's some skin-like pixels, assume human context
+        skin_ratio = np.sum(skin_mask > 0) / skin_mask.size
+        return skin_ratio > 0.05  # 5% skin-like pixels suggests human presence
     
     def _detect_severe_injuries_only(self, frame: np.ndarray) -> List[Dict]:
         """
@@ -1523,29 +1581,33 @@ def apply_facebook_blur(frame: np.ndarray, mask: np.ndarray, risk_score: float) 
         blur_strength += 1
     blur_strength = max(3, blur_strength)
     
-    # Calculate second pass blur size for double-pass safety (industry standard)
-    second_blur = max(3, blur_strength // 2)
+    # Facebook requires MAXIMUM blur intensity to prevent recognition
+    # Calculate enhanced blur sizes for Facebook compliance
+    facebook_blur = max(blur_strength * 2, 51)  # Much stronger blur for Facebook
+    if facebook_blur % 2 == 0:
+        facebook_blur += 1
+    
+    second_blur = max(blur_strength, 31)  # Also stronger second pass
     if second_blur % 2 == 0:
         second_blur += 1
     
-    # Apply TRIPLE-PASS blur for high-risk content (exceeds industry standard)
-    blurred = cv2.GaussianBlur(frame, (blur_strength, blur_strength), 0)
-    blurred = cv2.GaussianBlur(blurred, (second_blur, second_blur), 0)  # Second pass
+    # Apply QUAD-PASS blur for Facebook compliance (exceeds all standards)
+    blurred = cv2.GaussianBlur(frame, (facebook_blur, facebook_blur), 0)  # First: maximum blur
+    blurred = cv2.GaussianBlur(blurred, (second_blur, second_blur), 0)     # Second pass
+    blurred = cv2.GaussianBlur(blurred, (blur_strength, blur_strength), 0) # Third pass
     
-    # Triple pass for high-risk content (ensures complete unrecognizability)
-    if risk_score > 0.6:
-        third_blur = max(3, blur_strength // 3)
-        if third_blur % 2 == 0:
-            third_blur += 1
-        blurred = cv2.GaussianBlur(blurred, (third_blur, third_blur), 0)  # Third pass
+    # Fourth pass for Facebook compliance (ensures content is completely unrecognizable)
+    fourth_blur = max(15, blur_strength // 2)
+    if fourth_blur % 2 == 0:
+        fourth_blur += 1
+    blurred = cv2.GaussianBlur(blurred, (fourth_blur, fourth_blur), 0)  # Fourth pass
     
-    # Apply mask with stronger blending for high-risk areas
+    # Apply mask with maximum strength for Facebook compliance
     mask_normalized = mask.astype(np.float32) / 255.0
     
-    # Enhanced mask strength for pinpointed areas
-    if risk_score > 0.5:
-        # Boost mask intensity for high-confidence AI detections
-        mask_normalized = np.power(mask_normalized, 0.7)  # Makes mask more aggressive
+    # Facebook requires aggressive masking
+    # Boost mask intensity for ALL detections, not just high-confidence ones
+    mask_normalized = np.power(mask_normalized, 0.5)  # Much more aggressive masking
     
     mask_3d = np.dstack([mask_normalized] * 3)
     
