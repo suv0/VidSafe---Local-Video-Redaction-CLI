@@ -56,12 +56,112 @@ class IntelligentGoreDetector:
     def setup_object_detection(self):
         """Setup object detection model for gore/violence detection."""
         try:
+            # Try to load a lightweight YOLOv4-tiny model (automatic download if missing)
             self.net = None
             self.output_layers = None
+            model_dir = os.path.join(tempfile.gettempdir(), 'vidsafe_models')
+            os.makedirs(model_dir, exist_ok=True)
+
+            cfg_path = os.path.join(model_dir, 'yolov4-tiny.cfg')
+            weights_path = os.path.join(model_dir, 'yolov4-tiny.weights')
+            names_path = os.path.join(model_dir, 'coco.names')
+
+            # Small helper to download files if missing
+            def _download(url, dest):
+                if not os.path.exists(dest):
+                    try:
+                        print(f"⬇️  Downloading {os.path.basename(dest)}...")
+                        urllib.request.urlretrieve(url, dest)
+                    except Exception as e:
+                        print(f"⚠️  Failed to download {url}: {e}")
+
+            # Official-ish small YOLOv4-tiny weights/cfg (mirror) and COCO names
+            _download('https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4-tiny.cfg', cfg_path)
+            _download('https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights', weights_path)
+            _download('https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names', names_path)
+
+            if os.path.exists(cfg_path) and os.path.exists(weights_path):
+                try:
+                    self.net = cv2.dnn.readNetFromDarknet(cfg_path, weights_path)
+                    # Use OpenCV CPU backend (can be changed to CUDA if available)
+                    self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+                    self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+                    # Load class names
+                    if os.path.exists(names_path):
+                        with open(names_path, 'r') as f:
+                            self.class_names = [l.strip() for l in f.readlines() if l.strip()]
+                    else:
+                        self.class_names = []
+
+                    # Prepare output layer names
+                    ln = self.net.getLayerNames()
+                    self.output_layers = [ln[i - 1] for i in self.net.getUnconnectedOutLayers()]
+                    print("🤖 AI Gore Detection: YOLOv4-tiny model loaded (DNN)")
+                except Exception as e:
+                    print(f"⚠️  Failed to initialize DNN model: {e}")
+                    self.net = None
+                    self.output_layers = None
+            else:
+                print("⚠️  YOLOv4-tiny model files missing or download failed; falling back to heuristics")
+                self.net = None
             print("🤖 AI Gore Detection: Using enhanced discrimination algorithms")
         except Exception as e:
             print(f"⚠️  Advanced AI not available, using enhanced heuristics: {e}")
             self.net = None
+
+    def _detect_yolo_objects(self, frame: np.ndarray) -> List[Dict]:
+        """Run YOLO DNN on the frame and return detections as list of dicts.
+        Only return high-confidence detections and map certain classes to 'weapon' where appropriate.
+        """
+        detections: List[Dict] = []
+        if self.net is None or self.output_layers is None:
+            return detections
+
+        try:
+            h, w = frame.shape[:2]
+            # Create blob and forward
+            blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
+            self.net.setInput(blob)
+            outs = self.net.forward(self.output_layers)
+
+            boxes = []
+            confidences = []
+            class_ids = []
+
+            for out in outs:
+                for detection in out:
+                    scores = detection[5:]
+                    class_id = int(np.argmax(scores)) if len(scores) > 0 else -1
+                    conf = float(scores[class_id]) if len(scores) > 0 else 0.0
+                    if conf > 0.4:
+                        center_x = int(detection[0] * w)
+                        center_y = int(detection[1] * h)
+                        width_box = int(detection[2] * w)
+                        height_box = int(detection[3] * h)
+                        x = int(center_x - width_box / 2)
+                        y = int(center_y - height_box / 2)
+                        boxes.append([x, y, width_box, height_box])
+                        confidences.append(conf)
+                        class_ids.append(class_id)
+
+            # NMS to filter
+            idxs = cv2.dnn.NMSBoxes(boxes, confidences, 0.6, 0.4)  # Increased confidence threshold to 0.6
+            WEAPON_LIKE = {'knife'}  # Only real weapons, remove false positives like sports ball
+
+            if len(idxs) > 0:
+                for i in idxs.flatten():
+                    x, y, bw, bh = boxes[i]
+                    cls = self.class_names[class_ids[i]] if (hasattr(self, 'class_names') and class_ids[i] < len(self.class_names)) else str(class_ids[i])
+                    conf = confidences[i]
+                    det_type = 'weapon' if cls in WEAPON_LIKE else ('person' if cls == 'person' else cls)
+                    detections.append({'type': det_type, 'confidence': float(conf), 'bbox': (x, y, x + bw, y + bh)})
+
+        except Exception as e:
+            print(f"⚠️  YOLO detection failed: {e}, falling back to heuristics")
+            detections = []  # Return empty to use heuristics
+
+        return detections
     
     def detect_gore_objects(self, frame: np.ndarray) -> List[Dict]:
         """
@@ -69,36 +169,57 @@ class IntelligentGoreDetector:
         Enhanced to avoid false positives on living people and reduce flickering.
         """
         self.frame_count += 1
-        detections = []
-        
+        detections: List[Dict] = []
+
         # Method 1: Ultra-conservative weapon detection
-        weapon_regions = self._detect_weapons_enhanced(frame)
-        detections.extend(weapon_regions)
-        
+        try:
+            weapon_regions = self._detect_weapons_enhanced(frame)
+            detections.extend(weapon_regions)
+        except Exception:
+            pass
+
         # Method 2: Discriminating blood detection (avoid red clothing/makeup)
-        blood_regions = self._detect_actual_blood(frame)
-        detections.extend(blood_regions)
-        
+        try:
+            blood_regions = self._detect_actual_blood(frame)
+            detections.extend(blood_regions)
+        except Exception:
+            pass
+
         # Method 3: Death/corpse detection (NEW - distinguish dead from alive)
-        death_regions = self._detect_death_indicators(frame)
-        detections.extend(death_regions)
-        
+        try:
+            death_regions = self._detect_death_indicators(frame)
+            detections.extend(death_regions)
+        except Exception:
+            pass
+
+        # Method X: ML-based object detection (YOLOv4-tiny) to improve precision
+        if getattr(self, 'net', None) is not None:
+            try:
+                ml_dets = self._detect_yolo_objects(frame)
+                detections.extend(ml_dets)
+            except Exception as e:
+                # If ML fails, continue with heuristics
+                print(f"⚠️  ML detection error: {e}")
+
         # Method 4: Context-aware injury detection (avoid normal skin)
-        injury_regions = self._detect_severe_injuries_only(frame)
-        detections.extend(injury_regions)
-        
+        try:
+            injury_regions = self._detect_severe_injuries_only(frame)
+            detections.extend(injury_regions)
+        except Exception:
+            pass
+
         # REALITY CHECK: If we're detecting too many things, we're probably wrong
-        if len(detections) > 5:  # Much stricter - real gore videos shouldn't have 5+ areas per frame
+        if len(detections) > 3:  # Stricter - real gore videos shouldn't have 3+ areas per frame
             print(f"🚨 Reality check: {len(detections)} detections seems excessive, filtering...")
             # Keep only the highest confidence detections
-            detections = sorted(detections, key=lambda x: x['confidence'], reverse=True)[:2]
-        
+            detections = sorted(detections, key=lambda x: x.get('confidence', 0), reverse=True)[:1]
+
         # Method 5: Remove false positives from living people
         filtered_detections = self._filter_false_positives(frame, detections)
-        
+
         # Method 6: Apply temporal smoothing to reduce flickering
         stable_detections = self._apply_temporal_smoothing(filtered_detections)
-        
+
         # Enhanced logging for better understanding
         if stable_detections:
             print(f"📍 Frame {self.frame_count}: {len(stable_detections)} stable detections after smoothing")
@@ -108,7 +229,7 @@ class IntelligentGoreDetector:
                 print(f"   ⚠️  {det_type}: confidence {confidence:.2f}")
             if len(stable_detections) > 3:
                 print(f"   ... and {len(stable_detections) - 3} more")
-        
+
         return stable_detections
     
     def _cluster_weapon_lines(self, lines) -> List[List]:
@@ -1135,7 +1256,7 @@ def create_facebook_compliant_mask_legacy(frame: np.ndarray, risk_score: float) 
     return mask
 
 
-def facebook_compliant_redaction(input_path: str, output_path: str, debug_mode: bool = False):
+def facebook_compliant_redaction(input_path: str, output_path: str, debug_mode: bool = False, **kwargs):
     """
     Facebook-compliant redaction with proper H.264 encoding and audio preservation.
     Uses OpenCV for processing and FFmpeg for encoding to ensure platform compatibility.
@@ -1144,19 +1265,36 @@ def facebook_compliant_redaction(input_path: str, output_path: str, debug_mode: 
     print(f"Input: {input_path}")
     print(f"Output: {output_path}")
     
+    # New optional parameters (kept for backward compatibility via kwargs)
+    scale = kwargs.get('scale', 1.0) if 'kwargs' in locals() else 1.0
+    frame_skip = kwargs.get('frame_skip', 1) if 'kwargs' in locals() else 1
+    no_ai = kwargs.get('no_ai', False) if 'kwargs' in locals() else False
+    quiet = kwargs.get('quiet', False) if 'kwargs' in locals() else False
+
     # Create temporary directory for frame processing
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_video = os.path.join(temp_dir, "processed_video.mp4")
-        
-        # Process frames with OpenCV
-        process_frames_opencv(input_path, temp_video, debug_mode)
-        
+
+        # Process frames with OpenCV (supports scaling and frame-skipping)
+        process_frames_opencv(input_path, temp_video, debug_mode,
+                              scale=scale, frame_skip=frame_skip,
+                              no_ai=no_ai, quiet=quiet)
+
         # Combine processed video with original audio using FFmpeg
         combine_with_audio_ffmpeg(temp_video, input_path, output_path)
 
 
-def process_frames_opencv(input_path: str, temp_output: str, debug_mode: bool = False):
-    """Process video frames using OpenCV with intelligent gore detection."""
+def process_frames_opencv(input_path: str, temp_output: str, debug_mode: bool = False,
+                          scale: float = 1.0, frame_skip: int = 1,
+                          no_ai: bool = False, quiet: bool = False):
+    """Process video frames using OpenCV with intelligent gore detection.
+
+    New options:
+    - scale: float (0 < scale <= 1) to downscale frames for faster processing
+    - frame_skip: process every Nth frame (integer >=1)
+    - no_ai: if True, skip AI-heavy detection and use legacy heuristics
+    - quiet: if True, minimize logging
+    """
     # Initialize intelligent gore detector
     print("🤖 Initializing AI Gore Detection System...")
     gore_detector = IntelligentGoreDetector()
@@ -1170,9 +1308,16 @@ def process_frames_opencv(input_path: str, temp_output: str, debug_mode: bool = 
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Apply scaling if requested
+    if scale <= 0 or scale > 1.0:
+        scale = 1.0
+    proc_width = max(1, int(width * scale))
+    proc_height = max(1, int(height * scale))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    print(f"📹 Video Info: {width}x{height}, {fps} FPS, {total_frames} frames")
+    if not quiet:
+        print(f"📹 Video Info: {width}x{height}, {fps} FPS, {total_frames} frames; processing at {proc_width}x{proc_height}, skip={frame_skip}, no_ai={no_ai}")
     
     # Setup video writer with compatible codec for OpenCV processing
     # Try multiple codecs in order of preference until one works
@@ -1217,13 +1362,29 @@ def process_frames_opencv(input_path: str, temp_output: str, debug_mode: bool = 
             ret, frame = cap.read()
             if not ret:
                 break
-            
+
             frame_count += 1
+
+            # Frame skipping
+            if frame_skip > 1 and (frame_count - 1) % frame_skip != 0:
+                continue
+
+            # Resize for faster processing
+            if scale != 1.0:
+                frame_proc = cv2.resize(frame, (proc_width, proc_height), interpolation=cv2.INTER_LINEAR)
+            else:
+                frame_proc = frame
+
             progress = (frame_count / total_frames) * 100
-            print(f"Processing frame {frame_count}/{total_frames} ({progress:.1f}%) - AI detections: {ai_detections_count}", end='\r')
-            
-            # AI-powered content analysis
-            facebook_risk_score, detections = analyze_facebook_risk_intelligent(frame, gore_detector)
+            if not quiet:
+                print(f"Processing frame {frame_count}/{total_frames} ({progress:.1f}%) - AI detections: {ai_detections_count}", end='\r')
+
+            # AI-powered content analysis (or legacy fallback)
+            if no_ai:
+                facebook_risk_score = analyze_facebook_risk_legacy(frame_proc)
+                detections = []
+            else:
+                facebook_risk_score, detections = analyze_facebook_risk_intelligent(frame_proc, gore_detector)
             
             # Debug visualization if enabled
             if debug_mode and detections:
@@ -1262,8 +1423,13 @@ def process_frames_opencv(input_path: str, temp_output: str, debug_mode: bool = 
             else:
                 redacted_frame = frame.copy()
             
-            # Write frame
-            out.write(redacted_frame)
+            # Write frame(s)
+            # If we skipped processing frames for speed, duplicate the processed
+            # frame so the output video keeps the original duration and stays
+            # in sync with the original audio.
+            write_repeat = frame_skip if frame_skip > 1 else 1
+            for _ in range(write_repeat):
+                out.write(redacted_frame)
     
     finally:
         cap.release()
@@ -1675,11 +1841,17 @@ def main():
     parser.add_argument("input", help="Input video file")
     parser.add_argument("output", help="Output video file")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with detection visualization")
+    parser.add_argument("--scale", type=float, default=1.0, help="Downscale factor for processing (0.1-1.0)")
+    parser.add_argument("--frame-skip", type=int, default=1, help="Process every Nth frame for speed (1 = all)")
+    parser.add_argument("--no-ai", action="store_true", help="Disable AI heuristics and use faster legacy detection")
+    parser.add_argument("--quiet", action="store_true", help="Minimize console output")
     
     args = parser.parse_args()
     
     # Process video with Facebook compliance
-    facebook_compliant_redaction(args.input, args.output, args.debug)
+    facebook_compliant_redaction(args.input, args.output, args.debug,
+                                  scale=args.scale, frame_skip=args.frame_skip,
+                                  no_ai=args.no_ai, quiet=args.quiet)
 
 
 if __name__ == "__main__":
